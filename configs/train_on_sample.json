@@ -1,0 +1,52 @@
+{
+  "dataset_reader": {
+    "type": "nq",
+    "tokenizer": {
+      "model_name": "bert-large-uncased-whole-word-masking-finetuned-squad",
+      "do_lowercase": true
+    },
+    "token_indexers": {
+      "tokens": {
+        "type": "pretrained_transformer",
+        "model_name": "bert-large-uncased-whole-word-masking-finetuned-squad",
+        "do_lowercase": true
+      }
+    },
+    "model_name": "bert-large-uncased-whole-word-masking-finetuned-squad",
+    "is_training": true
+  },
+  "validation_dataset_reader": {
+    "type": "nq",
+    "tokenizer": {
+      "model_name": "bert-large-uncased-whole-word-masking-finetuned-squad",
+      "do_lowercase": true
+    },
+    "token_indexers": {
+      "tokens": {
+        "type": "pretrained_transformer",
+        "model_name": "bert-large-uncased-whole-word-masking-finetuned-squad",
+        "do_lowercase": true
+      }
+    },
+    "model_name": "bert-large-uncased-whole-word-masking-finetuned-squad",
+    "is_training": false
+  },
+  "iterator": {
+    "type": "basic",
+    "batch_size": 12
+  },
+  "model": {
+    "type": "nq",
+    "bert_pretrained_model": "bert-large-uncased-whole-word-masking-finetuned-squad"
+  },
+  "train_data_path": "data/nq/output/sample-train-0.0.1.json",
+  "validation_data_path": "data/nq/output/sample-val-0.0.1.json",
+  "trainer": {
+    "cuda_device": [0, 1],
+    "num_epochs": 2,
+    "optimizer": {
+      "type": "bert_adam",
+      "lr": 1e-05
+    }
+  }
+}

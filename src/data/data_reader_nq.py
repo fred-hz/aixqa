@@ -2,7 +2,11 @@ from typing import Dict, List, Iterable
 import logging
 import collections
 from overrides import overrides
+import math
 import numpy as np
+import os
+import json
+from multiprocessing import Pool
 
 from allennlp.data.dataset_readers import DatasetReader
 from allennlp.data import Instance
@@ -11,17 +15,11 @@ from allennlp.data.tokenizers import Tokenizer, PretrainedTransformerTokenizer
 from allennlp.data.fields import (Field, TextField, IndexField, LabelField, ListField,
                                   MetadataField, SequenceLabelField, SpanField, ArrayField)
 
+from ..util.utils_squad import Crop
 from ..util.utils_nq import NQExample, get_spans, check_is_max_context, read_nq_examples
+from ..util.utils_common import SplitAndCache
 
 logger = logging.getLogger(__name__)
-
-
-Crop = collections.namedtuple("Crop", ["unique_id", "doc_span_index",
-                                       "tokens", "token_to_orig_map", "token_is_max_context",
-                                       "input_ids", "attention_mask", "token_type_ids",
-                                       # "p_mask",
-                                       "paragraph_len", "answer_start_position", "answer_end_position",
-                                       "answer_is_impossible"])
 
 
 @DatasetReader.register('nq')
@@ -44,8 +42,9 @@ class NQDatasetReader(DatasetReader):
                  cls_token_segment_id: int = 0,
                  pad_token_segment_id: int = 0,
                  mask_padding: bool = True,
-                 lazy: bool = False) -> None:
-        super().__init__(lazy)
+                 lazy: bool = False,
+                 cache_directory: str = None) -> None:
+        super().__init__(lazy, cache_directory)
         self.tokenizer = tokenizer
         self.token_indexers = token_indexers
         if model_name is None:
@@ -92,15 +91,16 @@ class NQDatasetReader(DatasetReader):
         :return:
         """
         examples_gen = read_nq_examples(file_path, self.is_training)
-        examples = []
-        for _, example in enumerate(examples_gen):
-            examples.append(example)
 
-        for example_index, example in enumerate(examples):
-            if example_index % 1000 == 0 and example_index > 0:
-                logger.info('Converting %s: short_pos %s long_pos %s neg %s',
+        for example_index, example in enumerate(examples_gen):
+            if example_index % 10000 == 0 and example_index > 0:
+                logger.info('Converting %s examples: short_pos %s long_pos %s neg %s',
                             example_index,
                             self.num_short_pos, self.num_long_pos, self.num_neg)
+            crops = self.convert_example_to_crops(example)
+            # logger.info(f'saving crops into cache at {crops_cache_path}')
+            # crops_cache.dump(crops)
+
             """
             Crop = collections.namedtuple("Crop", ["unique_id", "doc_span_index",
                                        "tokens", "token_to_orig_map", "token_is_max_context",
@@ -110,10 +110,18 @@ class NQDatasetReader(DatasetReader):
                                        "answer_is_impossible"])
             )
             """
-            for crop_index, crop in enumerate(self.convert_example_to_crops(example)):
-                instance = self.text_to_instance(crop.input_ids,
-                                                 crop.token_type_ids,
-                                                 crop.attention_mask,
+            for crop_index, crop in enumerate(crops):
+
+                # reduce memory, only input_ids needs more bits
+                input_ids = np.array(crop.input_ids, dtype=np.int32)
+                # attention_mask = np.array(attention_mask, dtype=np.bool)
+                attention_mask = np.array(crop.attention_mask, dtype=np.int32)
+                # subtoken_type_ids = np.array(subtoken_type_ids, dtype=np.uint8)
+                token_type_ids = np.array(crop.token_type_ids, dtype=np.int32)
+
+                instance = self.text_to_instance(input_ids,
+                                                 token_type_ids,
+                                                 attention_mask,
                                                  crop.answer_start_position,
                                                  crop.answer_end_position)
                 yield instance
@@ -126,9 +134,10 @@ class NQDatasetReader(DatasetReader):
                          answer_start: int = None,
                          answer_end: int = None
                          ) -> Instance:
-        fields = {'input_ids': ArrayField(input_ids),
-                  'token_type_ids': ArrayField(token_type_ids),
-                  'attention_mask': ArrayField(attention_mask),
+        # Long Tensor needed for embedding layer
+        fields = {'input_ids': ArrayField(input_ids, dtype=np.dtype('int64')),
+                  'token_type_ids': ArrayField(token_type_ids, dtype=np.dtype('int64')),
+                  'attention_mask': ArrayField(attention_mask, dtype=np.dtype('int8')),
                   'start_positions': LabelField(answer_start, skip_indexing=True),
                   'end_positions': LabelField(answer_end, skip_indexing=True)}
         return Instance(fields)
@@ -139,7 +148,7 @@ class NQDatasetReader(DatasetReader):
         :param text:
         :return: List[str]
         """
-        return self.tokenizer._tokenizer.tokenize(text)
+        return self.tokenizer.tokenizer.tokenize(text)
 
     def _convert_tokens_to_ids(self, tokens: List[str]):
         """
@@ -147,7 +156,7 @@ class NQDatasetReader(DatasetReader):
         :param tokens:
         :return: List[int]
         """
-        return self.tokenizer._tokenizer.convert_tokens_to_ids(tokens)
+        return self.tokenizer.tokenizer.convert_tokens_to_ids(tokens)
 
     def convert_example_to_crops(self,
                                  example: NQExample
@@ -230,6 +239,7 @@ class NQDatasetReader(DatasetReader):
         UNMAPPED = -123
         # doc_spans are in the subtoken level
         doc_spans = get_spans(self.doc_stride, max_subtokens_for_doc, len(doc_subtokens))
+        # crops = []
         for doc_span_index, doc_span in enumerate(doc_spans):
             span_sample_subtokens = []
             subtoken_to_passage_map = UNMAPPED * np.ones((self.max_seq_length, ), dtype=np.int32)
@@ -254,7 +264,7 @@ class NQDatasetReader(DatasetReader):
             if span_subtoken_start_position == 0 and span_subtoken_end_position == 0:
                 # Answer is impossible for this span. Drop impossible samples by probability.
                 span_answer_is_positive = False
-                if np.random.rand() > self.p_keep_impossible:
+                if self.is_training and np.random.rand() > self.p_keep_impossible:
                     continue
 
             # CLS token at the beginning
@@ -307,11 +317,6 @@ class NQDatasetReader(DatasetReader):
                 attention_mask.append(0 if self.mask_padding else 1)
                 subtoken_type_ids.append(self.pad_token_segment_id)
 
-            # reduce memory, only input_ids needs more bits
-            input_ids = np.array(input_ids, dtype=np.int32)
-            attention_mask = np.array(attention_mask, dtype=np.bool)
-            subtoken_type_ids = np.array(subtoken_type_ids, dtype=np.uint8)
-
             if span_answer_is_positive:
                 if sample_is_long_or_short == 'long':
                     self.num_long_pos += 1
@@ -324,10 +329,12 @@ class NQDatasetReader(DatasetReader):
 
             crop = Crop(
                 unique_id=self.unique_id,
+                # TODO
+                example_index=example.qas_id,
                 doc_span_index=doc_span_index,
                 tokens=span_sample_subtokens,
-                token_to_orig_map=subtoken_to_passage_map,
-                token_is_max_context=subtoken_is_max_content,
+                token_to_orig_map=subtoken_to_passage_map.tolist(),
+                token_is_max_context=subtoken_is_max_content.tolist(),
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 token_type_ids=subtoken_type_ids,
@@ -337,4 +344,7 @@ class NQDatasetReader(DatasetReader):
                 answer_is_impossible=not span_answer_is_positive
             )
             self.unique_id += 1
+
             yield crop
+        #     crops.append(crop)
+        # return crops

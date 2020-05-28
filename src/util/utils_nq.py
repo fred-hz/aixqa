@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import collections
-import pickle
+import h5py
 import pandas as pd
 from tqdm import tqdm
 import numpy as np
@@ -42,6 +42,7 @@ def read_nq_examples(input_file_or_data, is_training):
     """
     if isinstance(input_file_or_data, str):
         input_file_or_data = cached_path(input_file_or_data)
+
         with open(input_file_or_data, "r", encoding='utf-8') as f:
             input_data = json.load(f)["data"]
 

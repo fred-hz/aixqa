@@ -7,10 +7,12 @@ from torch.nn import CrossEntropyLoss
 
 from allennlp.data import Vocabulary
 from allennlp.models.model import Model
-from allennlp.models.reading_comprehension.util import get_best_span
 from allennlp.nn import util, InitializerApplicator, RegularizerApplicator
 from allennlp.nn.util import masked_softmax
-from pytorch_transformers import BertModel
+from transformers import BertModel, BertConfig
+
+import warnings
+warnings.filterwarnings("ignore")
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +24,9 @@ class BertForNaturalQuestionAnswering(Model):
                  bert_pretrained_model: str,
                  initializer: InitializerApplicator = InitializerApplicator()) -> None:
         super().__init__(vocab)
-        self.bert_model = BertModel.from_pretrained(bert_pretrained_model)
+
+        bert_config = BertConfig.from_pretrained(bert_pretrained_model, max_seq_length=356)
+        self.bert_model = BertModel.from_pretrained(bert_pretrained_model, config=bert_config)
         bert_dim = self.bert_model.pooler.dense.out_features
         self.qa_outputs = torch.nn.Linear(bert_dim, 2)
         initializer(self)
@@ -56,13 +60,13 @@ class BertForNaturalQuestionAnswering(Model):
         :param end_positions: End position if it's training data. None for testing.
         :return:
         """
-        outputs = self.bert(
+        # print(input_ids, type(input_ids), input_ids.type())
+        # print(attention_mask, type(attention_mask), attention_mask.type())
+        # print(token_type_ids, type(token_type_ids), token_type_ids.type())
+        outputs = self.bert_model(
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
-            position_ids=position_ids,
-            head_mask=head_mask,
-            inputs_embeds=inputs_embeds,
         )
 
         sequence_output = outputs[0]

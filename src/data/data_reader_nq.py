@@ -15,8 +15,9 @@ from allennlp.data.tokenizers import Tokenizer, PretrainedTransformerTokenizer
 from allennlp.data.fields import (Field, TextField, IndexField, LabelField, ListField,
                                   MetadataField, SequenceLabelField, SpanField, ArrayField)
 
-from ..util.utils_squad import Crop
-from ..util.utils_nq import NQExample, get_spans, check_is_max_context, read_nq_examples
+from ..util.utils_squad import SquadCrop
+from ..util.utils_squad import get_spans, check_is_max_context
+from ..util.utils_nq import NQExample, read_nq_examples
 from ..util.utils_common import SplitAndCache
 
 logger = logging.getLogger(__name__)
@@ -267,6 +268,7 @@ class NQDatasetReader(DatasetReader):
                 if self.is_training and np.random.rand() > self.p_keep_impossible:
                     continue
 
+            # Generate model inputs
             # CLS token at the beginning
             span_sample_subtokens.append(self.cls_token)
             subtoken_type_ids.append(self.cls_token_segment_id)

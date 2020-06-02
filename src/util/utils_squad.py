@@ -2,6 +2,7 @@ import logging
 import collections
 import six
 import math
+import numpy as np
 import json
 from typing import List, Dict
 
@@ -91,7 +92,7 @@ class SquadCrop(object):
         :param paragraph_len:
         :param start_position:
         :param end_position:
-        :param answer_is_impossible:
+        :param is_impossible:
         """
         self.unique_id = unique_id
         self.example_index = example_index
@@ -157,20 +158,17 @@ def convert_examples_to_crops(examples_gen, tokenizer, max_seq_length,
     """Loads a data file into a list of `InputBatch`s."""
     assert p_keep_impossible is not None, '`p_keep_impossible` is required'
     assert stage in ('training', 'validation', 'testing')
-    is_training, is_validation, is_testing = 
-        stage == 'training', stage == 'validation', stage == 'testing'
+    is_training, is_validation, is_testing = \
+        (stage == 'training', stage == 'validation', stage == 'testing')
 
     unique_id = 1000000000
     num_pos, num_neg = 0, 0
     sub_token_cache = {}
-    # max_N, max_M = 1024, 1024
-    # f = np.zeros((max_N, max_M), dtype=np.float32)
 
-    crops = []
     for example_index, example in enumerate(examples_gen):
         if example_index % 1000 == 0 and example_index > 0:
             logger.info('Converting %s examples: num_pos %s num_neg %s',
-                example_index, num_pos, num_neg)
+                        example_index, num_pos, num_neg)
 
         query_tokens = tokenizer.tokenize(example.question_text)
         if len(query_tokens) > max_query_length:
@@ -218,7 +216,6 @@ def convert_examples_to_crops(examples_gen, tokenizer, max_seq_length,
         doc_spans = get_spans(doc_stride, max_tokens_for_doc, len(all_doc_tokens))
         for doc_span_index, doc_span in enumerate(doc_spans):
             # Tokens are constructed as: CLS Query SEP Paragraph SEP
-
 
             # Needed by testing
             token_to_orig_map = UNMAPPED * np.ones((max_seq_length, ), dtype=np.int32)
@@ -274,8 +271,8 @@ def convert_examples_to_crops(examples_gen, tokenizer, max_seq_length,
                 split_token_index = doc_span.start + i
                 if is_testing:
                     token_to_orig_map[len(tokens)] = tok_to_orig_index[split_token_index]
-                    token_is_max_context[len(tokens)] = check_is_max_context(doc_spans,
-                        doc_span_index, split_token_index)
+                    token_is_max_context[len(tokens)] = \
+                        check_is_max_context(doc_spans, doc_span_index, split_token_index)
                 tokens.append(all_doc_tokens[split_token_index])
                 token_type_ids.append(sequence_b_segment_id)
 
@@ -303,12 +300,10 @@ def convert_examples_to_crops(examples_gen, tokenizer, max_seq_length,
             input_ids = np.array(input_ids, dtype=np.int32)
             attention_mask = np.array(attention_mask, dtype=np.bool)
             token_type_ids = np.array(token_type_ids, dtype=np.uint8)
-            # p_mask = np.array(p_mask, dtype=np.bool)
 
             if (is_training or is_validation) and is_impossible:
                 start_position = CLS_INDEX
                 end_position = CLS_INDEX
-
 
             if is_impossible:
                 num_neg += 1

@@ -15,7 +15,7 @@ from allennlp.data.tokenizers import Tokenizer, PretrainedTransformerTokenizer
 from allennlp.data.fields import (Field, TextField, IndexField, LabelField, ListField,
                                   MetadataField, SequenceLabelField, SpanField, ArrayField)
 
-from ..util.utils_squad import SquadCrop
+from ..util.utils_squad import SquadCrop, SquadExample
 from ..util.utils_squad import get_spans, check_is_max_context
 from ..util.utils_nq import NQExample, read_nq_examples
 from ..util.utils_common import SplitAndCache

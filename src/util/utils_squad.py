@@ -66,17 +66,21 @@ class SquadCrop(object):
                  unique_id,
                  example_index,
                  tokens,
-                 doc_span_index=None,
+                 input_ids,
+                 attention_mask,
+                 token_type_ids,
+                 doc_span_index,
                  token_to_orig_map=None,
                  token_is_max_context=None,
                  paragraph_len=None,
                  start_position=None,
                  end_position=None,
-                 answer_is_impossible=False):
+                 is_impossible=None):
         """
         A single crop.
-        `unique_id`, `example_index`, `tokens` are needed at both training/validation and inference time.
-        `start_position`, `end_position`, `answer_is_impossible` are needed only at training/validation time.
+        `unique_id`, `example_index`, `tokens`, `input_ids`, `attention_mask`, `token_type_ids`, `doc_span_index` 
+        are needed at both training/validation and inference time.
+        `start_position`, `end_position`, `is_impossible` are needed only at training/validation time.
         `token_to_orig_map`, `token_is_max_context` are needed only at inference time.
         :param unique_id:
         :param example_index:
@@ -92,13 +96,16 @@ class SquadCrop(object):
         self.unique_id = unique_id
         self.example_index = example_index
         self.tokens = tokens
+        self.input_ids = input_ids
+        self.attention_mask = attention_mask
+        self.token_type_ids = token_type_ids
         self.doc_span_index = doc_span_index
         self.token_to_orig_map = token_to_orig_map
         self.token_is_max_context = token_is_max_context
         self.paragraph_len = paragraph_len
         self.start_position = start_position
         self.end_position = end_position
-        self.answer_is_impossible = answer_is_impossible
+        self.is_impossible = is_impossible
 
 
 class SquadRawResult(object):
@@ -135,6 +142,206 @@ class SquadNbestPrediction(object):
         self.orig_doc_start = orig_doc_start
         self.orig_doc_end = orig_doc_end
         self.unique_id = unique_id
+
+
+def convert_examples_to_crops(examples_gen, tokenizer, max_seq_length,
+                              doc_stride, max_query_length, stage,
+                              cls_token='[CLS]', sep_token='[SEP]', pad_id=0,
+                              sequence_a_segment_id=0,
+                              sequence_b_segment_id=1,
+                              cls_token_segment_id=0,
+                              pad_token_segment_id=0,
+                              mask_padding_with_zero=True,
+                              p_keep_impossible=None,
+                              sep_token_extra=False):
+    """Loads a data file into a list of `InputBatch`s."""
+    assert p_keep_impossible is not None, '`p_keep_impossible` is required'
+    assert stage in ('training', 'validation', 'testing')
+    is_training, is_validation, is_testing = 
+        stage == 'training', stage == 'validation', stage == 'testing'
+
+    unique_id = 1000000000
+    num_pos, num_neg = 0, 0
+    sub_token_cache = {}
+    # max_N, max_M = 1024, 1024
+    # f = np.zeros((max_N, max_M), dtype=np.float32)
+
+    crops = []
+    for example_index, example in enumerate(examples_gen):
+        if example_index % 1000 == 0 and example_index > 0:
+            logger.info('Converting %s examples: num_pos %s num_neg %s',
+                example_index, num_pos, num_neg)
+
+        query_tokens = tokenizer.tokenize(example.question_text)
+        if len(query_tokens) > max_query_length:
+            query_tokens = query_tokens[0:max_query_length]
+
+        # This takes the longest!
+        tok_to_orig_index = []
+        orig_to_tok_index = []
+        all_doc_tokens = []
+
+        for i, token in enumerate(example.doc_tokens):
+            orig_to_tok_index.append(len(all_doc_tokens))
+            sub_tokens = sub_token_cache.get(token)
+            if sub_tokens is None:
+                sub_tokens = tokenizer.tokenize(token)
+                sub_token_cache[token] = sub_tokens
+            tok_to_orig_index.extend([i for _ in range(len(sub_tokens))])
+            all_doc_tokens.extend(sub_tokens)
+
+        tok_start_position = None
+        tok_end_position = None
+        if is_training or is_validation:
+            if example.is_impossible:
+                tok_start_position = -1
+                tok_end_position = -1
+            else:
+                tok_start_position = orig_to_tok_index[example.start_position]
+                if example.end_position < len(example.doc_tokens) - 1:
+                    tok_end_position = orig_to_tok_index[
+                        example.end_position + 1] - 1
+                else:
+                    tok_end_position = len(all_doc_tokens) - 1
+
+        # For Bert: [CLS] question [SEP] paragraph [SEP]
+        special_tokens_count = 3
+        if sep_token_extra:
+            # For Roberta: <s> question </s> </s> paragraph </s>
+            special_tokens_count += 1
+        max_tokens_for_doc = max_seq_length - len(query_tokens) - special_tokens_count
+        assert max_tokens_for_doc > 0
+        # We can have documents that are longer than the maximum
+        # sequence length. To deal with this we do a sliding window
+        # approach, where we take chunks of the up to our max length
+        # with a stride of `doc_stride`.
+        doc_spans = get_spans(doc_stride, max_tokens_for_doc, len(all_doc_tokens))
+        for doc_span_index, doc_span in enumerate(doc_spans):
+            # Tokens are constructed as: CLS Query SEP Paragraph SEP
+
+
+            # Needed by testing
+            token_to_orig_map = UNMAPPED * np.ones((max_seq_length, ), dtype=np.int32)
+            # Needed by testing
+            token_is_max_context = np.zeros((max_seq_length, ), dtype=np.bool)
+            # Needed by training, validation and testing
+            is_impossible = example.is_impossible
+            # Needed by training, validation
+            start_position = None
+            # Needed by training, validation
+            end_position = None
+
+            special_tokens_offset = special_tokens_count - 1
+            doc_offset = len(query_tokens) + special_tokens_offset
+            if (is_training or is_validation) and not is_impossible:
+                doc_start = doc_span.start
+                doc_end = doc_span.start + doc_span.length - 1
+                if not (tok_start_position >= doc_start and tok_end_position <= doc_end):
+                    start_position = 0
+                    end_position = 0
+                    is_impossible = True
+                else:
+                    start_position = tok_start_position - doc_start + doc_offset
+                    end_position = tok_end_position - doc_start + doc_offset
+
+            # drop impossible samples
+            if is_impossible:
+                if np.random.rand() > p_keep_impossible:
+                    continue
+
+            # Needed by training, validation and testing
+            tokens = []
+            # Needed by training, validation and testing
+            token_type_ids = []
+
+            # CLS token at the beginning
+            tokens.append(cls_token)
+            token_type_ids.append(cls_token_segment_id)
+
+            # Query
+            tokens += query_tokens
+            token_type_ids += [sequence_a_segment_id] * len(query_tokens)
+
+            # SEP token
+            tokens.append(sep_token)
+            token_type_ids.append(sequence_a_segment_id)
+            if sep_token_extra:
+                tokens.append(sep_token)
+                token_type_ids.append(sequence_a_segment_id)
+
+            # Paragraph
+            for i in range(doc_span.length):
+                split_token_index = doc_span.start + i
+                if is_testing:
+                    token_to_orig_map[len(tokens)] = tok_to_orig_index[split_token_index]
+                    token_is_max_context[len(tokens)] = check_is_max_context(doc_spans,
+                        doc_span_index, split_token_index)
+                tokens.append(all_doc_tokens[split_token_index])
+                token_type_ids.append(sequence_b_segment_id)
+
+            paragraph_len = doc_span.length
+
+            # SEP token
+            tokens.append(sep_token)
+            token_type_ids.append(sequence_b_segment_id)
+            # p_mask.append(1)  # can not be answer
+
+            input_ids = tokenizer.convert_tokens_to_ids(tokens)
+
+            # The mask has 1 for real tokens and 0 for padding tokens. Only real
+            # tokens are attended to.
+            # Needed by training, validation and testing
+            attention_mask = [1 if mask_padding_with_zero else 0] * len(input_ids)
+
+            # Zero-pad up to the sequence length.
+            while len(input_ids) < max_seq_length:
+                input_ids.append(pad_id)
+                attention_mask.append(0 if mask_padding_with_zero else 1)
+                token_type_ids.append(pad_token_segment_id)
+
+            # reduce memory, only input_ids needs more bits
+            input_ids = np.array(input_ids, dtype=np.int32)
+            attention_mask = np.array(attention_mask, dtype=np.bool)
+            token_type_ids = np.array(token_type_ids, dtype=np.uint8)
+            # p_mask = np.array(p_mask, dtype=np.bool)
+
+            if (is_training or is_validation) and is_impossible:
+                start_position = CLS_INDEX
+                end_position = CLS_INDEX
+
+
+            if is_impossible:
+                num_neg += 1
+            else:
+                num_pos += 1
+
+            if is_training or is_validation:
+                crop = SquadCrop(
+                    unique_id=unique_id,
+                    example_index=example_index,
+                    doc_span_index=doc_span_index,
+                    tokens=tokens,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    token_type_ids=token_type_ids,
+                    paragraph_len=paragraph_len,
+                    start_position=start_position,
+                    end_position=end_position,
+                    is_impossible=is_impossible)
+            else:
+                crop = SquadCrop(
+                    unique_id=unique_id,
+                    example_index=example_index,
+                    doc_span_index=doc_span_index,
+                    tokens=tokens,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    token_type_ids=token_type_ids,
+                    paragraph_len=paragraph_len,
+                    token_to_orig_map=token_to_orig_map,
+                    token_is_max_context=token_is_max_context)
+            yield crop
+            unique_id += 1
 
 
 DocSpan = collections.namedtuple("DocSpan", ["start", "length"])
